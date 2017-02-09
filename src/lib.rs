@@ -227,7 +227,7 @@ mod tests {
     use super::*;
 
     #[derive(Serialize, Deserialize)]
-    #[derive(PartialEq,Debug)]
+    #[derive(PartialEq, Debug)]
     struct Foo {
         i: i32,
         b: bool,
