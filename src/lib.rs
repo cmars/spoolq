@@ -52,6 +52,28 @@ impl<T: Serialize + Deserialize> Queue<T> {
 
     pub fn pop(&self) -> Result<Option<T>, std::io::Error> {
         let dirh = std::fs::read_dir(&self.path)?;
+        for maybe_dirent in dirh {
+            let item_path = match maybe_dirent {
+                Ok(dirent) => dirent.path(),
+                Err(e) => return Err(e),
+            };
+            {
+                let item_file = std::fs::OpenOptions::new().read(true)
+                    .open(&item_path)?;
+                let _cleanup = Cleanup::File(item_path.to_str().unwrap().to_string());
+                let maybe_item: Result<T, serde_json::error::Error> =
+                    serde_json::from_reader(item_file);
+                match maybe_item {
+                    Ok(item) => return Ok(Some(item)),
+                    Err(e) => return Err(to_ioerror(&e)),
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn pull(&self) -> Result<Option<T>, std::io::Error> {
+        let dirh = std::fs::read_dir(&self.path)?;
         let mut items: Vec<_> = dirh.filter(|item| match item {
                 &Ok(ref dirent) => {
                     let p = dirent.path();
