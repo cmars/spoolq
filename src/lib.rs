@@ -6,7 +6,6 @@ extern crate notify;
 extern crate serde;
 extern crate serde_json;
 extern crate textnonce;
-extern crate chrono;
 
 use std::sync::mpsc;
 use std::error::Error as StdError;
@@ -23,6 +22,7 @@ use serde::{Serialize, Deserialize};
 /// that fail to deserialize will be discarded.
 pub struct Queue<T> {
     path: String,
+    seq: u32,
     _placeholder: std::marker::PhantomData<T>,
 }
 
@@ -32,14 +32,15 @@ impl<T: Serialize + Deserialize> Queue<T> {
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(path)?;
         Ok(Queue::<T> {
             path: path.to_string(),
+            seq: 0,
             _placeholder: std::marker::PhantomData,
         })
     }
 
     /// Push an item into the Queue.
-    pub fn push(&self, item: T) -> Result<(), std::io::Error> {
+    pub fn push(&mut self, item: T) -> Result<(), std::io::Error> {
         let mut item_path = std::path::PathBuf::from(&self.path);
-        let item_name = format!("{}-{}", chrono::UTC::now().timestamp(), rand_string());
+        let item_name = format!("{:016x}-{}", self.seq, rand_string());
         item_path.push(item_name);
         let complete_path = item_path.to_str().unwrap();
         item_path.with_extension("inc");
@@ -56,6 +57,7 @@ impl<T: Serialize + Deserialize> Queue<T> {
             }
         }
         std::fs::rename(incomplete_path, complete_path)?;
+        self.seq += 1;
         Ok(())
     }
 
@@ -89,14 +91,13 @@ impl<T: Serialize + Deserialize> Queue<T> {
 
     /// Pull the next queued item off the queue.
     ///
-    /// This method returns the next item, based on the system time when the item was pushed
-    /// onto the queue. Note that system time may not always be in monotonically increasing order,
-    /// so this is not strictly guaranteed.
+    /// This method returns the next item, based on an internal monotonically increasing sequence
+    /// number starting at 0 when the Queue is instantiated.
     ///
     /// This method may be much slower, especially if the queue size grows large.
     ///
     /// If multiple threads or processes are pulling from the same queue directory, globally
-    /// duplicates may occur, since reading the item's file and removing it is not atomic.
+    /// duplicates may occur, since reading the item's file and then removing it is not atomic.
     pub fn pull(&self) -> Result<Option<T>, std::io::Error> {
         let dirh = std::fs::read_dir(&self.path)?;
         let mut items: Vec<_> = dirh.filter(|item| match item {
@@ -111,10 +112,10 @@ impl<T: Serialize + Deserialize> Queue<T> {
             })
             .map(|item| item.unwrap())
             .collect();
-        items.sort_by_key(|dir| dir.path());
         if items.is_empty() {
             return Ok(None);
         }
+        items.sort_by_key(|item| item.file_name());
         let item_path = &items[0].path();
         {
             let item_file = std::fs::OpenOptions::new().read(true)
@@ -188,7 +189,7 @@ mod cleanup {
     pub enum Cleanup {
         File(String),
         #[allow(dead_code)]
-        Dir(String),
+        Dir(String), // not really dead code, tests use this.
     }
 
     impl Drop for Cleanup {
@@ -222,6 +223,7 @@ fn rand_string() -> String {
 #[cfg(test)]
 mod tests {
     use std;
+    use std::collections::HashSet;
     use super::*;
 
     #[derive(Serialize, Deserialize)]
@@ -243,7 +245,7 @@ mod tests {
 
     #[test]
     fn test_push_pop() {
-        let (q, _cleanup) = new_queue();
+        let (mut q, _cleanup) = new_queue();
         assert!(q.push(Foo {
                 i: 999,
                 b: true,
@@ -257,23 +259,82 @@ mod tests {
                        b: true,
                        s: "foo".to_string(),
                    });
+        assert!(match q.pop() {
+            Ok(None) => true,
+            _ => false,
+        })
     }
 
     #[test]
     fn test_push_pull() {
-        let (q, _cleanup) = new_queue();
+        let (mut q, _cleanup) = new_queue();
         assert!(q.push(Foo {
                 i: 888,
                 b: false,
                 s: "bar".to_string(),
             })
             .is_ok());
-        let result = q.pop().unwrap().unwrap();
+        let result = q.pull().unwrap().unwrap();
         assert_eq!(result,
                    Foo {
                        i: 888,
                        b: false,
                        s: "bar".to_string(),
                    });
+        assert!(match q.pull() {
+            Ok(None) => true,
+            _ => false,
+        })
+    }
+
+    #[test]
+    fn test_push_pop_many() {
+        let (mut q, _cleanup) = new_queue();
+        let mut indexes = HashSet::<i32>::new();
+        for i in 0..100 {
+            assert!(q.push(Foo {
+                    i: i,
+                    b: i % 3 == 0,
+                    s: format!("#{}", i),
+                })
+                .is_ok());
+            indexes.insert(i);
+        }
+        for _ in 0..100 {
+            let item = q.pop().unwrap().unwrap();
+            assert_eq!(item.b, item.i % 3 == 0);
+            assert_eq!(item.s, format!("#{}", item.i));
+            assert!(item.i > -1);
+            assert!(item.i < 100);
+            indexes.remove(&item.i);
+        }
+        assert!(match q.pop() {
+            Ok(None) => true,
+            _ => false,
+        });
+        assert!(indexes.is_empty());
+    }
+
+    #[test]
+    fn test_push_pull_many() {
+        let (mut q, _cleanup) = new_queue();
+        for i in 0..100 {
+            assert!(q.push(Foo {
+                    i: i,
+                    b: i % 3 == 0,
+                    s: format!("#{}", i),
+                })
+                .is_ok());
+        }
+        for i in 0..100 {
+            let item = q.pull().unwrap().unwrap();
+            assert_eq!(item.i, i);
+            assert_eq!(item.b, i % 3 == 0);
+            assert_eq!(item.s, format!("#{}", i));
+        }
+        assert!(match q.pull() {
+            Ok(None) => true,
+            _ => false,
+        })
     }
 }

@@ -4,7 +4,6 @@ version = "0.1.0"
 authors = ["Casey Marshall <github@cmars.tech>"]
 
 [dependencies]
-chrono = "0.3"
 futures = "0.1"
 notify = "4.0.0"
 serde = "0.9"
