@@ -1,7 +1,10 @@
 [package]
 name = "spoolq"
 version = "0.1.0"
+description = "A durable queue backed by filesystem storage"
+license = "Apache-2.0"
 authors = ["Casey Marshall <github@cmars.tech>"]
+repository = "https://github.com/cmars/spoolq"
 
 [dependencies]
 futures = "0.1"
