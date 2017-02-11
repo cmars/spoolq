@@ -1,6 +1,6 @@
 [package]
 name = "spoolq"
-version = "0.1.0"
+version = "0.1.1"
 description = "A durable queue backed by filesystem storage"
 license = "Apache-2.0"
 authors = ["Casey Marshall <github@cmars.tech>"]
@@ -8,7 +8,6 @@ repository = "https://github.com/cmars/spoolq"
 
 [dependencies]
 futures = "0.1"
-notify = "4.0.0"
 serde = "0.9"
 serde_derive = "0.9"
 serde_json = "0.9"

@@ -2,12 +2,10 @@
 extern crate serde_derive;
 
 extern crate futures;
-extern crate notify;
 extern crate serde;
 extern crate serde_json;
 extern crate textnonce;
 
-use std::sync::mpsc;
 use std::error::Error as StdError;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 
@@ -51,10 +49,7 @@ impl<T: Serialize + Deserialize> Queue<T> {
                 .mode(0o600)
                 .create_new(true)
                 .open(&incomplete_path)?;
-            match serde_json::to_writer(&mut item_file, &item) {
-                Ok(_) => {}
-                Err(e) => return Err(to_ioerror(&e)),
-            }
+            serde_json::to_writer(&mut item_file, &item).map_err(to_ioerror)?;
         }
         std::fs::rename(incomplete_path, complete_path)?;
         self.seq += 1;
@@ -78,12 +73,8 @@ impl<T: Serialize + Deserialize> Queue<T> {
                 let item_file = std::fs::OpenOptions::new().read(true)
                     .open(&item_path)?;
                 let _cleanup = cleanup::Cleanup::File(item_path.to_str().unwrap().to_string());
-                let maybe_item: Result<T, serde_json::error::Error> =
-                    serde_json::from_reader(item_file);
-                match maybe_item {
-                    Ok(item) => return Ok(Some(item)),
-                    Err(e) => return Err(to_ioerror(&e)),
-                }
+                let item = serde_json::from_reader(item_file).map_err(to_ioerror)?;
+                return Ok(Some(item));
             }
         }
         Ok(None)
@@ -121,12 +112,8 @@ impl<T: Serialize + Deserialize> Queue<T> {
             let item_file = std::fs::OpenOptions::new().read(true)
                 .open(item_path)?;
             let _cleanup = cleanup::Cleanup::File(item_path.to_str().unwrap().to_string());
-            let maybe_item: Result<T, serde_json::error::Error> =
-                serde_json::from_reader(item_file);
-            match maybe_item {
-                Ok(item) => return Ok(Some(item)),
-                Err(e) => return Err(to_ioerror(&e)),
-            }
+            let item = serde_json::from_reader(item_file).map_err(to_ioerror)?;
+            Ok(Some(item))
         }
     }
 }
@@ -134,25 +121,23 @@ impl<T: Serialize + Deserialize> Queue<T> {
 /// Process a Queue<T> as a stream of future values.
 pub struct QueueStream<T> {
     queue: Queue<T>,
-    _watcher: notify::RecommendedWatcher,
-    rx: mpsc::Receiver<notify::DebouncedEvent>,
+}
+
+impl<T: Serialize + Deserialize> QueueStream<T> {
+    /// Get a reference to the underlying queue.
+    pub fn queue(&self) -> &Queue<T> {
+        &self.queue
+    }
+    /// Get a mutable reference to the underlying queue.
+    pub fn mut_queue(&mut self) -> &mut Queue<T> {
+        &mut self.queue
+    }
 }
 
 impl<T: Serialize + Deserialize> QueueStream<T> {
     /// Create a new QueueStream<T> with the given spool path.
-    pub fn new(path: &str) -> Result<QueueStream<T>, std::io::Error> {
-        let queue = Queue::<T>::new(path)?;
-        let (tx, rx) = mpsc::channel();
-        let watcher = match notify::Watcher::new(tx, std::time::Duration::from_secs(1)) {
-            Ok(watcher) => watcher,
-            Err(notify::Error::Io(e)) => return Err(e),
-            Err(e) => return Err(to_ioerror(&e)),
-        };
-        Ok(QueueStream::<T> {
-            queue: queue,
-            _watcher: watcher,
-            rx: rx,
-        })
+    pub fn new(q: Queue<T>) -> QueueStream<T> {
+        QueueStream::<T> { queue: q }
     }
 }
 
@@ -164,21 +149,15 @@ impl<T: Serialize + Deserialize> futures::stream::Stream for QueueStream<T> {
     ///
     /// This method polls the underlying filesystem watcher for changes since the last poll.
     fn poll(&mut self) -> futures::Poll<Option<Self::Item>, Self::Error> {
-        match self.rx.try_recv() {
-            Ok(_) => {
-                match self.queue.pop() {
-                    Ok(Some(t)) => Ok(futures::Async::Ready(Some(t))),
-                    Ok(None) => Ok(futures::Async::NotReady),
-                    Err(e) => Err(to_ioerror(&e)),
-                }
-            }
-            Err(mpsc::TryRecvError::Empty) => Ok(futures::Async::NotReady),
-            Err(mpsc::TryRecvError::Disconnected) => Ok(futures::Async::Ready(None)),
+        match self.queue.pop() {
+            Ok(Some(t)) => Ok(futures::Async::Ready(Some(t))),
+            Ok(None) => Ok(futures::Async::NotReady),
+            Err(e) => Err(e),
         }
     }
 }
 
-fn to_ioerror(e: &StdError) -> std::io::Error {
+fn to_ioerror<E: StdError>(e: E) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::Other, e.description())
 }
 
@@ -224,6 +203,9 @@ fn rand_string() -> String {
 mod tests {
     use std;
     use std::collections::HashSet;
+
+    use futures::{Future, Stream};
+
     use super::*;
 
     #[derive(Serialize, Deserialize)]
@@ -336,5 +318,24 @@ mod tests {
             Ok(None) => true,
             _ => false,
         })
+    }
+
+    #[test]
+    fn test_push_in_stream_out() {
+        let (q, _cleanup) = new_queue();
+        let mut qs = QueueStream::new(q);
+        for i in 0..100 {
+            assert!(qs.mut_queue()
+                .push(Foo {
+                    i: i,
+                    b: i % 3 == 0,
+                    s: format!("#{}", i),
+                })
+                .is_ok());
+        }
+        let f = qs.take(100).fold(0,
+                                  |agg, item| -> Result<i32, std::io::Error> { Ok(agg + item.i) });
+        let result = f.wait().unwrap();
+        assert_eq!(result, 4950); // 0+1+2+..+99
     }
 }
