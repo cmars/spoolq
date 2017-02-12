@@ -1,5 +1,6 @@
 # spoolq
-[![Build Status](https://travis-ci.org/cmars/spoolq.svg?branch=master)](https://travis-ci.org/cmars/spoolq)
+[![Linux & OSX Status](https://travis-ci.org/cmars/spoolq.svg?branch=master)](https://travis-ci.org/cmars/spoolq)
+[![Windows status](https://ci.appveyor.com/api/projects/status/efgyafhusu0kjpc4?svg=true)](https://ci.appveyor.com/project/cmars/spoolq)
 [![Crate](https://img.shields.io/crates/v/spoolq.svg)](https://crates.io/crates/spoolq)
 
 A durable queue backed by filesystem storage.
