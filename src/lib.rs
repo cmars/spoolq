@@ -96,10 +96,13 @@ impl<T: Serialize + Deserialize> Queue<T> {
             match maybe_dirent {
                 Ok(dirent) => {
                     let p = dirent.path();
-                    if let Some(e) = p.extension() {
-                        if e != "pop" {
-                            continue;
+                    match p.extension() {
+                        Some(e) => {
+                            if e != "pop" {
+                                continue;
+                            }
                         }
+                        None => continue,
                     }
                     std::fs::remove_file(p)?;
                 }
@@ -298,6 +301,7 @@ mod tests {
                 .is_ok());
             indexes.insert(i);
         }
+        q.flush().unwrap();
         for _ in 0..100 {
             let item = q.pop().unwrap().unwrap();
             assert_eq!(item.b, item.i % 3 == 0);
