@@ -40,9 +40,8 @@ impl<T: Serialize + Deserialize> Queue<T> {
         let mut item_path = std::path::PathBuf::from(&self.path);
         let item_name = format!("{:016x}-{}", self.seq, rand_string());
         item_path.push(item_name);
-        let complete_path = item_path.to_str().unwrap();
-        item_path.with_extension("inc");
-        let incomplete_path = item_path.to_str().unwrap().to_string();
+        let complete_path = item_path.to_str().unwrap().to_string();
+        let incomplete_path = item_path.with_extension("inc").to_str().unwrap().to_string();
 
         {
             let mut item_file = std::fs::OpenOptions::new().write(true)
@@ -56,65 +55,85 @@ impl<T: Serialize + Deserialize> Queue<T> {
         Ok(())
     }
 
-    /// Pop an item off the queue without regard to ordering.
+    /// Pop an item off the queue.
     ///
-    /// This method returns the first matching directory entry. Queue ordering cannot be
-    /// guaranteed, as the serialized file is chosen based on the filesystem's ordering.
+    /// This method returns the first matching directory entry. Queue ordering cannot be guaranteed
+    /// to be consistent across all operating systems and filesystems, as the serialized file will
+    /// be chosen based on the filesystem's directory entry ordering.
     ///
-    /// Use this method when you value speed over order-correctness.
+    /// Popped items are not removed from the filesystem immediately; instead, they are marked for
+    /// deletion. Use flush() to cause the items to be permanently removed from the underlying
+    /// filesystem.
     pub fn pop(&self) -> Result<Option<T>, std::io::Error> {
         let dirh = std::fs::read_dir(&self.path)?;
         for maybe_dirent in dirh {
             let item_path = match maybe_dirent {
-                Ok(dirent) => dirent.path(),
+                Ok(dirent) => {
+                    let p = dirent.path();
+                    if let Some(_) = p.extension() {
+                        continue;
+                    }
+                    p
+                }
                 Err(e) => return Err(e),
             };
+            let stage_path = item_path.with_extension("pop");
             {
                 let item_file = std::fs::OpenOptions::new().read(true)
                     .open(&item_path)?;
-                let _cleanup = cleanup::Cleanup::File(item_path.to_str().unwrap().to_string());
                 let item = serde_json::from_reader(item_file).map_err(to_ioerror)?;
+                std::fs::rename(item_path, stage_path)?;
                 return Ok(Some(item));
             }
         }
         Ok(None)
     }
 
-    /// Pull the next queued item off the queue.
-    ///
-    /// This method returns the next item, based on an internal monotonically increasing sequence
-    /// number starting at 0 when the Queue is instantiated.
-    ///
-    /// This method may be much slower, especially if the queue size grows large.
-    ///
-    /// If multiple threads or processes are pulling from the same queue directory, globally
-    /// duplicates may occur, since reading the item's file and then removing it is not atomic.
-    pub fn pull(&self) -> Result<Option<T>, std::io::Error> {
+    /// Flush removes all pending item files marked for deletion.
+    pub fn flush(&self) -> Result<(), std::io::Error> {
         let dirh = std::fs::read_dir(&self.path)?;
-        let mut items: Vec<_> = dirh.filter(|item| match item {
-                &Ok(ref dirent) => {
+        for maybe_dirent in dirh {
+            match maybe_dirent {
+                Ok(dirent) => {
                     let p = dirent.path();
-                    match p.extension() {
-                        Some(_) => false,
-                        None => p.is_file(),
+                    if let Some(e) = p.extension() {
+                        if e != "pop" {
+                            continue;
+                        }
                     }
+                    std::fs::remove_file(p)?;
                 }
-                &Err(_) => false,
-            })
-            .map(|item| item.unwrap())
-            .collect();
-        if items.is_empty() {
-            return Ok(None);
+                Err(e) => return Err(e),
+            }
         }
-        items.sort_by_key(|item| item.file_name());
-        let item_path = &items[0].path();
-        {
-            let item_file = std::fs::OpenOptions::new().read(true)
-                .open(item_path)?;
-            let _cleanup = cleanup::Cleanup::File(item_path.to_str().unwrap().to_string());
-            let item = serde_json::from_reader(item_file).map_err(to_ioerror)?;
-            Ok(Some(item))
+        Ok(())
+    }
+
+    /// Recover unmarks all pending item files that were previously marked for deletion.
+    ///
+    /// Use recover to ensure that popped items are processed at least once, when it is uncertain
+    /// whether they were processed due to a crash.
+    ///
+    /// This method is only recommended if items are being processed idempotently.
+    pub fn recover(&self) -> Result<(), std::io::Error> {
+        let dirh = std::fs::read_dir(&self.path)?;
+        for maybe_dirent in dirh {
+            match maybe_dirent {
+                Ok(dirent) => {
+                    let p = dirent.path();
+                    if let Some(e) = p.extension() {
+                        if e != "pop" {
+                            continue;
+                        }
+                    }
+                    let unmarked =
+                        p.parent().unwrap().join(std::path::Path::new(p.file_stem().unwrap()));
+                    std::fs::rename(p, unmarked)?;
+                }
+                Err(e) => return Err(e),
+            }
         }
+        Ok(())
     }
 }
 
@@ -145,7 +164,7 @@ impl<T: Serialize + Deserialize> futures::stream::Stream for QueueStream<T> {
     type Item = T;
     type Error = std::io::Error;
 
-    /// Attempt to pull the next item off the stream.
+    /// Attempt to pop the next item off the stream.
     ///
     /// This method polls the underlying filesystem watcher for changes since the last poll.
     fn poll(&mut self) -> futures::Poll<Option<Self::Item>, Self::Error> {
@@ -165,23 +184,14 @@ mod cleanup {
     use std;
     use std::ops::Drop;
 
+    #[allow(dead_code)]
     pub enum Cleanup {
-        File(String),
-        #[allow(dead_code)]
         Dir(String), // not really dead code, tests use this.
     }
 
     impl Drop for Cleanup {
         fn drop(&mut self) {
             match self {
-                &mut Cleanup::File(ref path) => {
-                    match std::fs::remove_file(path) {
-                        Ok(_) => {}
-                        Err(e) => {
-                            println!("warning: failed to remove file {}: {}", path, e);
-                        }
-                    }
-                }
                 &mut Cleanup::Dir(ref path) => {
                     match std::fs::remove_dir_all(path) {
                         Ok(_) => {}
@@ -248,28 +258,6 @@ mod tests {
     }
 
     #[test]
-    fn test_push_pull() {
-        let (mut q, _cleanup) = new_queue();
-        assert!(q.push(Foo {
-                i: 888,
-                b: false,
-                s: "bar".to_string(),
-            })
-            .is_ok());
-        let result = q.pull().unwrap().unwrap();
-        assert_eq!(result,
-                   Foo {
-                       i: 888,
-                       b: false,
-                       s: "bar".to_string(),
-                   });
-        assert!(match q.pull() {
-            Ok(None) => true,
-            _ => false,
-        })
-    }
-
-    #[test]
     fn test_push_pop_many() {
         let (mut q, _cleanup) = new_queue();
         let mut indexes = HashSet::<i32>::new();
@@ -298,8 +286,9 @@ mod tests {
     }
 
     #[test]
-    fn test_push_pull_many() {
+    fn test_recover_flush() {
         let (mut q, _cleanup) = new_queue();
+        let mut indexes = HashSet::<i32>::new();
         for i in 0..100 {
             assert!(q.push(Foo {
                     i: i,
@@ -307,17 +296,40 @@ mod tests {
                     s: format!("#{}", i),
                 })
                 .is_ok());
+            indexes.insert(i);
         }
-        for i in 0..100 {
-            let item = q.pull().unwrap().unwrap();
-            assert_eq!(item.i, i);
-            assert_eq!(item.b, i % 3 == 0);
-            assert_eq!(item.s, format!("#{}", i));
+        for _ in 0..100 {
+            let item = q.pop().unwrap().unwrap();
+            assert_eq!(item.b, item.i % 3 == 0);
+            assert_eq!(item.s, format!("#{}", item.i));
+            assert!(item.i > -1);
+            assert!(item.i < 100);
+            indexes.remove(&item.i);
         }
-        assert!(match q.pull() {
+        assert!(match q.pop() {
             Ok(None) => true,
             _ => false,
-        })
+        });
+        assert!(indexes.is_empty());
+
+        q.recover().unwrap();
+        for _ in 0..100 {
+            let item = q.pop().unwrap().unwrap();
+            assert_eq!(item.b, item.i % 3 == 0);
+            assert_eq!(item.s, format!("#{}", item.i));
+            assert!(item.i > -1);
+            assert!(item.i < 100);
+        }
+        assert!(match q.pop() {
+            Ok(None) => true,
+            _ => false,
+        });
+        q.flush().unwrap();
+        q.recover().unwrap();
+        assert!(match q.pop() {
+            Ok(None) => true,
+            _ => false,
+        });
     }
 
     #[test]
