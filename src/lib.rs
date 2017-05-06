@@ -75,6 +75,16 @@ impl<T: Serialize + Deserialize> Queue<T> {
     /// deletion. Use flush() to cause the items to be permanently removed from the underlying
     /// filesystem.
     pub fn pop(&self) -> Result<Option<T>, std::io::Error> {
+        self.pop_filter(|_| true)
+    }
+
+    /// Pop an item off the queue matching the filter function.
+    ///
+    /// This method works the same as pop(), except the item must match the given function or it is
+    /// not popped off the queue.
+    pub fn pop_filter<F>(&self, filter: F) -> Result<Option<T>, std::io::Error>
+        where F: Fn(&T) -> bool
+    {
         let dirh = std::fs::read_dir(&self.path)?;
         for maybe_dirent in dirh {
             let item_path = match maybe_dirent {
@@ -91,8 +101,10 @@ impl<T: Serialize + Deserialize> Queue<T> {
             {
                 let item_file = std::fs::OpenOptions::new().read(true).open(&item_path)?;
                 let item = serde_json::from_reader(item_file).map_err(to_ioerror)?;
-                std::fs::rename(item_path, stage_path)?;
-                return Ok(Some(item));
+                if filter(&item) {
+                    std::fs::rename(item_path, stage_path)?;
+                    return Ok(Some(item));
+                }
             }
         }
         Ok(None)
@@ -270,6 +282,32 @@ mod tests {
                     Ok(None) => true,
                     _ => false,
                 })
+    }
+
+    #[test]
+    fn test_push_pop_filter() {
+        let (mut q, _cleanup) = new_queue();
+        assert!(q.push(Foo {
+                           i: 111,
+                           b: true,
+                           s: "foo".to_string(),
+                       })
+                    .is_ok());
+        assert!(match q.pop_filter(|x| x.i == 222) {
+                    // Doesn't match the filter fn
+                    Ok(None) => true,
+                    _ => false,
+                });
+        assert!(match q.pop_filter(|x| x.i == 111) {
+                    // It matches the fn
+                    Ok(Some(ref foo)) => foo.i == 111,
+                    _ => false,
+                });
+        assert!(match q.pop_filter(|x| x.i == 111) {
+                    // It matches but it's gone
+                    Ok(None) => true,
+                    _ => false,
+                });
     }
 
     #[test]
