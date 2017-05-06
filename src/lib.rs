@@ -85,6 +85,25 @@ impl<T: Serialize + Deserialize> Queue<T> {
     pub fn pop_filter<F>(&self, filter: F) -> Result<Option<T>, std::io::Error>
         where F: Fn(&T) -> bool
     {
+        match self.drain_filter(filter, Some(1)) {
+            Ok(ref mut result) => {
+                if result.len() > 0 {
+                    return Ok(Some(result.remove(0)));
+                }
+            }
+            Err(e) => return Err(e),
+        }
+        Ok(None)
+    }
+
+    pub fn drain(&self) -> Result<Vec<T>, std::io::Error> {
+        self.drain_filter(|_| true, None)
+    }
+
+    fn drain_filter<F>(&self, filter: F, limit: Option<usize>) -> Result<Vec<T>, std::io::Error>
+        where F: Fn(&T) -> bool
+    {
+        let mut result = vec![];
         let dirh = std::fs::read_dir(&self.path)?;
         for maybe_dirent in dirh {
             let item_path = match maybe_dirent {
@@ -103,11 +122,16 @@ impl<T: Serialize + Deserialize> Queue<T> {
                 let item = serde_json::from_reader(item_file).map_err(to_ioerror)?;
                 if filter(&item) {
                     std::fs::rename(item_path, stage_path)?;
-                    return Ok(Some(item));
+                    result.push(item);
+                }
+                if let Some(l) = limit {
+                    if result.len() == l {
+                        return Ok(result);
+                    }
                 }
             }
         }
-        Ok(None)
+        Ok(result)
     }
 
     /// Flush removes all pending item files marked for deletion.
