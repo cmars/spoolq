@@ -18,6 +18,7 @@ use serde::{Serialize, Deserialize};
 ///
 /// The queue's directory should only contain items of the same type. Any files in the spool
 /// that fail to deserialize will be discarded.
+#[derive(Clone, Debug)]
 pub struct Queue<T> {
     path: String,
     seq: u32,
@@ -27,12 +28,15 @@ pub struct Queue<T> {
 impl<T: Serialize + Deserialize> Queue<T> {
     /// Create a new `Queue<T>` using the given directory path for storage.
     pub fn new(path: &str) -> Result<Queue<T>, std::io::Error> {
-        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(path)?;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)?;
         Ok(Queue::<T> {
-            path: path.to_string(),
-            seq: 0,
-            _placeholder: std::marker::PhantomData,
-        })
+               path: path.to_string(),
+               seq: 0,
+               _placeholder: std::marker::PhantomData,
+           })
     }
 
     /// Push an item into the Queue.
@@ -41,14 +45,20 @@ impl<T: Serialize + Deserialize> Queue<T> {
         let item_name = format!("{:016x}-{}", self.seq, rand_string());
         item_path.push(item_name);
         let complete_path = item_path.to_str().unwrap().to_string();
-        let incomplete_path = item_path.with_extension("inc").to_str().unwrap().to_string();
+        let incomplete_path = item_path
+            .with_extension("inc")
+            .to_str()
+            .unwrap()
+            .to_string();
 
         {
-            let mut item_file = std::fs::OpenOptions::new().write(true)
+            let mut item_file = std::fs::OpenOptions::new()
+                .write(true)
                 .mode(0o600)
                 .create_new(true)
                 .open(&incomplete_path)?;
-            serde_json::to_writer(&mut item_file, &item).map_err(to_ioerror)?;
+            serde_json::to_writer(&mut item_file, &item)
+                .map_err(to_ioerror)?;
         }
         std::fs::rename(incomplete_path, complete_path)?;
         self.seq += 1;
@@ -79,8 +89,7 @@ impl<T: Serialize + Deserialize> Queue<T> {
             };
             let stage_path = item_path.with_extension("pop");
             {
-                let item_file = std::fs::OpenOptions::new().read(true)
-                    .open(&item_path)?;
+                let item_file = std::fs::OpenOptions::new().read(true).open(&item_path)?;
                 let item = serde_json::from_reader(item_file).map_err(to_ioerror)?;
                 std::fs::rename(item_path, stage_path)?;
                 return Ok(Some(item));
@@ -129,8 +138,9 @@ impl<T: Serialize + Deserialize> Queue<T> {
                             continue;
                         }
                     }
-                    let unmarked =
-                        p.parent().unwrap().join(std::path::Path::new(p.file_stem().unwrap()));
+                    let unmarked = p.parent()
+                        .unwrap()
+                        .join(std::path::Path::new(p.file_stem().unwrap()));
                     std::fs::rename(p, unmarked)?;
                 }
                 Err(e) => return Err(e),
@@ -209,7 +219,9 @@ mod cleanup {
 }
 
 fn rand_string() -> String {
-    textnonce::TextNonce::sized_urlsafe(32).unwrap().into_string()
+    textnonce::TextNonce::sized_urlsafe(32)
+        .unwrap()
+        .into_string()
 }
 
 #[cfg(test)]
@@ -242,11 +254,11 @@ mod tests {
     fn test_push_pop() {
         let (mut q, _cleanup) = new_queue();
         assert!(q.push(Foo {
-                i: 999,
-                b: true,
-                s: "foo".to_string(),
-            })
-            .is_ok());
+                           i: 999,
+                           b: true,
+                           s: "foo".to_string(),
+                       })
+                    .is_ok());
         let result = q.pop().unwrap().unwrap();
         assert_eq!(result,
                    Foo {
@@ -255,9 +267,9 @@ mod tests {
                        s: "foo".to_string(),
                    });
         assert!(match q.pop() {
-            Ok(None) => true,
-            _ => false,
-        })
+                    Ok(None) => true,
+                    _ => false,
+                })
     }
 
     #[test]
@@ -266,11 +278,11 @@ mod tests {
         let mut indexes = HashSet::<i32>::new();
         for i in 0..100 {
             assert!(q.push(Foo {
-                    i: i,
-                    b: i % 3 == 0,
-                    s: format!("#{}", i),
-                })
-                .is_ok());
+                               i: i,
+                               b: i % 3 == 0,
+                               s: format!("#{}", i),
+                           })
+                        .is_ok());
             indexes.insert(i);
         }
         for _ in 0..100 {
@@ -282,9 +294,9 @@ mod tests {
             indexes.remove(&item.i);
         }
         assert!(match q.pop() {
-            Ok(None) => true,
-            _ => false,
-        });
+                    Ok(None) => true,
+                    _ => false,
+                });
         assert!(indexes.is_empty());
     }
 
@@ -294,11 +306,11 @@ mod tests {
         let mut indexes = HashSet::<i32>::new();
         for i in 0..100 {
             assert!(q.push(Foo {
-                    i: i,
-                    b: i % 3 == 0,
-                    s: format!("#{}", i),
-                })
-                .is_ok());
+                               i: i,
+                               b: i % 3 == 0,
+                               s: format!("#{}", i),
+                           })
+                        .is_ok());
             indexes.insert(i);
         }
         q.flush().unwrap();
@@ -311,9 +323,9 @@ mod tests {
             indexes.remove(&item.i);
         }
         assert!(match q.pop() {
-            Ok(None) => true,
-            _ => false,
-        });
+                    Ok(None) => true,
+                    _ => false,
+                });
         assert!(indexes.is_empty());
 
         q.recover().unwrap();
@@ -325,15 +337,15 @@ mod tests {
             assert!(item.i < 100);
         }
         assert!(match q.pop() {
-            Ok(None) => true,
-            _ => false,
-        });
+                    Ok(None) => true,
+                    _ => false,
+                });
         q.flush().unwrap();
         q.recover().unwrap();
         assert!(match q.pop() {
-            Ok(None) => true,
-            _ => false,
-        });
+                    Ok(None) => true,
+                    _ => false,
+                });
     }
 
     #[test]
@@ -342,15 +354,16 @@ mod tests {
         let mut qs = QueueStream::new(q);
         for i in 0..100 {
             assert!(qs.mut_queue()
-                .push(Foo {
-                    i: i,
-                    b: i % 3 == 0,
-                    s: format!("#{}", i),
-                })
-                .is_ok());
+                        .push(Foo {
+                                  i: i,
+                                  b: i % 3 == 0,
+                                  s: format!("#{}", i),
+                              })
+                        .is_ok());
         }
-        let f = qs.take(100).fold(0,
-                                  |agg, item| -> Result<i32, std::io::Error> { Ok(agg + item.i) });
+        let f = qs.take(100)
+            .fold(0,
+                  |agg, item| -> Result<i32, std::io::Error> { Ok(agg + item.i) });
         let result = f.wait().unwrap();
         assert_eq!(result, 4950); // 0+1+2+..+99
     }
